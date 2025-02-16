@@ -54,29 +54,16 @@ class ReminderHandler:
         
         # 檢查行程
         cursor = db.execute("""
-            SELECT user_id, title, scheduled_time, description 
+            SELECT user_id, title, scheduled_time, description, remind_before
             FROM schedules 
             WHERE reminded = 0 
-            AND datetime(scheduled_time) <= datetime(?)
+            AND datetime(scheduled_time, '-' || remind_before || ' minutes') <= datetime(?)
             AND datetime(scheduled_time) >= datetime(?)
         """, (
-            (current_time + timedelta(minutes=5)).strftime('%Y-%m-%d %H:%M:%S'),
+            current_time.strftime('%Y-%m-%d %H:%M:%S'),
             current_time.strftime('%Y-%m-%d %H:%M:%S')
         ))
         schedules = cursor.fetchall()
-
-        # 檢查提醒
-        cursor = db.execute("""
-            SELECT user_id, content, reminder_time 
-            FROM reminders 
-            WHERE reminded = 0 
-            AND datetime(reminder_time) <= datetime(?)
-            AND datetime(reminder_time) >= datetime(?)
-        """, (
-            (current_time + timedelta(minutes=5)).strftime('%Y-%m-%d %H:%M:%S'),
-            current_time.strftime('%Y-%m-%d %H:%M:%S')
-        ))
-        reminders = cursor.fetchall()
 
         # 發送行程提醒
         for schedule in schedules:
@@ -100,13 +87,26 @@ class ReminderHandler:
                 )
                 db.commit()
             except Exception as e:
-                print(f"發送行程提醒時出錯: {str(e)}")
+                print(f"發送提醒時出錯: {str(e)}")
+
+        # 檢查提醒
+        cursor = db.execute("""
+            SELECT user_id, content, remind_time 
+            FROM reminders 
+            WHERE reminded = 0 
+            AND datetime(remind_time) <= datetime(?)
+            AND datetime(remind_time) >= datetime(?)
+        """, (
+            current_time.strftime('%Y-%m-%d %H:%M:%S'),
+            current_time.strftime('%Y-%m-%d %H:%M:%S')
+        ))
+        reminders = cursor.fetchall()
 
         # 發送一般提醒
         for reminder in reminders:
             try:
-                reminder_time = datetime.strptime(reminder['reminder_time'], '%Y-%m-%d %H:%M:%S')
-                message = f"提醒：您在 {reminder_time.strftime('%Y-%m-%d %H:%M')} 設置了提醒\n內容：{reminder['content']}"
+                remind_time = datetime.strptime(reminder['remind_time'], '%Y-%m-%d %H:%M:%S')
+                message = f"提醒：{reminder['content']}"
 
                 self.messaging_api.push_message(
                     PushMessageRequest(
@@ -117,8 +117,8 @@ class ReminderHandler:
 
                 # 更新提醒狀態
                 db.execute(
-                    "UPDATE reminders SET reminded = 1 WHERE user_id = ? AND reminder_time = ?",
-                    (reminder['user_id'], reminder['reminder_time'])
+                    "UPDATE reminders SET reminded = 1 WHERE user_id = ? AND remind_time = ?",
+                    (reminder['user_id'], reminder['remind_time'])
                 )
                 db.commit()
             except Exception as e:

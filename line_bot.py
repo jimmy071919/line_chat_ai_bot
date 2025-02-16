@@ -21,7 +21,9 @@ from linebot.v3.messaging import (
     FlexBox,
     FlexText,
     FlexButton,
-    FlexCarousel
+    FlexCarousel,
+    QuickReply,
+    QuickReplyItem
 )
 from database import Database, init_db, get_db, close_db
 from datetime import datetime, timedelta
@@ -51,6 +53,9 @@ messaging_api = MessagingApi(api_client)
 # 用戶狀態管理
 user_states = {}
 thread_local = threading.local()
+
+# 用戶聊天歷史
+user_chat_history = {}
 
 # 初始化 Gemini 聊天
 chat = get_gemini_response()
@@ -369,6 +374,17 @@ def create_schedule_bubble(schedule):
     scheduled_time = schedule['scheduled_time'] if schedule['scheduled_time'] else "未設定"
     title = schedule['title'] if schedule['title'] else "未設定標題"
     description = schedule['description'] if schedule['description'] else "無詳細內容"
+    remind_before = schedule['remind_before'] if schedule['remind_before'] else 5
+    
+    # 格式化提醒時間顯示
+    remind_text = "提前 "
+    if remind_before >= 1440:  # 1天 = 1440分鐘
+        remind_text += f"{remind_before // 1440} 天"
+    elif remind_before >= 60:  # 1小時 = 60分鐘
+        remind_text += f"{remind_before // 60} 小時"
+    else:
+        remind_text += f"{remind_before} 分鐘"
+    remind_text += "提醒"
     
     return FlexBubble(
         size="kilo",
@@ -384,6 +400,7 @@ def create_schedule_bubble(schedule):
             contents=[
                 FlexText(text=description, wrap=True),
                 FlexText(text=f"時間：{scheduled_time}", size="sm"),
+                FlexText(text=f"提醒：{remind_text}", size="sm"),
             ]
         ),
         footer=FlexBox(
@@ -786,6 +803,50 @@ def handle_postback(event):
                 )
             )
     
+    elif data.get('action') == "set_remind_time":
+        # 初始化數據庫連接
+        db = Database()
+        
+        # 從用戶狀態中獲取行程信息
+        user_state = db.get_user_state(user_id)
+        if not user_state or 'data' not in user_state:
+            return
+        
+        state_data = user_state['data']
+        title = state_data.get('title', '')
+        description = state_data.get('description', '')
+        selected_time = state_data.get('selected_time', '')
+        remind_minutes = int(data.get('minutes', '5'))  # 獲取用戶選擇的提醒時間
+        
+        if not all([title, selected_time]):
+            return
+        
+        # 添加行程到數據庫
+        print(f"添加行程: 標題={title}, 內容={description}, 時間={selected_time}, 提前{remind_minutes}分鐘提醒")
+        db.add_schedule(user_id, title, description, selected_time, remind_minutes)
+        
+        # 清除用戶狀態
+        db.clear_user_state(user_id)
+        
+        # 發送確認消息
+        remind_text = "提前 "
+        if remind_minutes >= 1440:  # 1天 = 1440分鐘
+            remind_text += f"{remind_minutes // 1440} 天"
+        elif remind_minutes >= 60:  # 1小時 = 60分鐘
+            remind_text += f"{remind_minutes // 60} 小時"
+        else:
+            remind_text += f"{remind_minutes} 分鐘"
+        remind_text += "提醒"
+        
+        messaging_api.reply_message(
+            ReplyMessageRequest(
+                reply_token=event.reply_token,
+                messages=[
+                    TextMessage(text=f"已為您添加行程：\n標題：{title}\n時間：{selected_time}\n{remind_text}")
+                ]
+            )
+        )
+    
     elif data.get('action') == "add_schedule":
         # 設置用戶狀態為等待輸入行程標題
         set_user_state(user_id, {"state": "waiting_for_schedule"})
@@ -1008,6 +1069,74 @@ def handle_postback(event):
             )
         )
 
+def create_remind_time_options():
+    """創建提醒時間選項"""
+    options = [
+        QuickReplyItem(
+            action=PostbackAction(
+                label="5分鐘前",
+                data="action=set_remind_time&minutes=5"
+            )
+        ),
+        QuickReplyItem(
+            action=PostbackAction(
+                label="10分鐘前",
+                data="action=set_remind_time&minutes=10"
+            )
+        ),
+        QuickReplyItem(
+            action=PostbackAction(
+                label="15分鐘前",
+                data="action=set_remind_time&minutes=15"
+            )
+        ),
+        QuickReplyItem(
+            action=PostbackAction(
+                label="30分鐘前",
+                data="action=set_remind_time&minutes=30"
+            )
+        ),
+        QuickReplyItem(
+            action=PostbackAction(
+                label="1小時前",
+                data="action=set_remind_time&minutes=60"
+            )
+        ),
+        QuickReplyItem(
+            action=PostbackAction(
+                label="2小時前",
+                data="action=set_remind_time&minutes=120"
+            )
+        ),
+        QuickReplyItem(
+            action=PostbackAction(
+                label="1天前",
+                data="action=set_remind_time&minutes=1440"
+            )
+        )
+    ]
+    return QuickReply(items=options)
+
+def check_schedule_keywords(text):
+    """檢查文字是否包含行程相關關鍵字"""
+    keywords = ['行程', '日程', '安排', '計畫', '活動', '提醒', '待辦', '今天', '明天', '下週', '下个月']
+    return any(keyword in text for keyword in keywords)
+
+def format_schedule_info(schedules):
+    """格式化行程信息"""
+    if not schedules:
+        return "目前沒有任何行程安排喔！ 😊"
+    
+    result = "📅 以下是您的行程安排：\n"
+    for schedule in schedules:
+        result += f"\n🔸 {schedule['title']}\n"
+        result += f"📝 內容：{schedule['description']}\n"
+        result += f"⏰ 時間：{schedule['time']}\n"
+        if schedule['remind_before']:
+            result += f"⚡ 提前 {schedule['remind_before']} 分鐘提醒\n"
+        result += "─────────────\n"
+    return result
+
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     """處理文字消息"""
@@ -1047,26 +1176,33 @@ def handle_message(event):
                         messages=[TextMessage(text="請輸入行程內容：")]
                     )
                 )
-            else:
-                # 第二步：保存內容並創建行程
-                selected_time = data.get('selected_time')
-                title = data.get('title')
-                if not selected_time:
-                    raise ValueError("缺少行程時間")
-
-                print(f"添加行程: 標題={title}, 內容={text}, 時間={selected_time}")  # 添加日誌
-                # 添加行程
+            elif not data.get('description'):
+                # 第二步：保存內容並詢問提醒時間
+                data['description'] = text
                 db = Database()
-                if db.add_schedule(user_id, title, text, selected_time):
-                    message = TextMessage(text=f"已添加行程：{title}\n內容：{text}\n時間：{selected_time}")
-                else:
-                    message = TextMessage(text="添加行程失敗，請重試")
-                
+                db.set_user_state(user_id, {
+                    'state': 'waiting_for_schedule',
+                    'data': data
+                })
+                messaging_api.reply_message(
+                    ReplyMessageRequest(
+                        reply_token=event.reply_token,
+                        messages=[
+                            TextMessage(
+                                text="請選擇要提前多久提醒：",
+                                quick_reply=create_remind_time_options()
+                            )
+                        ]
+                    )
+                )
+            else:
+                # 不應該到達這裡
+                db = Database()
                 db.clear_user_state(user_id)
                 messaging_api.reply_message(
                     ReplyMessageRequest(
                         reply_token=event.reply_token,
-                        messages=[message]
+                        messages=[TextMessage(text="發生錯誤，請重新開始")]
                     )
                 )
         except Exception as e:
@@ -1079,48 +1215,49 @@ def handle_message(event):
             )
             db = Database()
             db.clear_user_state(user_id)
-    
-    # 處理提醒輸入
-    elif state and state.get("state") == "waiting_for_reminder":
-        try:
-            # 獲取之前保存的時間
-            selected_time = state.get('data', {}).get('selected_time')
-            if not selected_time:
-                raise ValueError("缺少提醒時間")
-
-            print(f"添加提醒: 內容={text}, 時間={selected_time}")  # 添加日誌
-            # 添加提醒
-            db = get_db()
-            db.add_reminder(user_id, text, selected_time)
-            
-            # 重置狀態
-            set_user_state(user_id, {"state": None})
-            
-            messaging_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text="提醒已添加！")]
-                )
-            )
-        except Exception as e:
-            print(f"添加提醒時發生錯誤: {str(e)}")  # 添加日誌
-            messaging_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text=f"添加提醒失敗：{str(e)}")]
-                )
-            )
-    
     else:
         # AI 對話處理
         try:
-            response = chat.send_message(text)
+            # 檢查是否包含行程相關關鍵字
+            if check_schedule_keywords(text):
+                print("檢測到行程相關關鍵字，正在查詢行程...")
+                # 查詢用戶的行程
+                schedules = db.get_user_schedules(user_id)
+                print(f"查詢到的行程: {schedules}")
+                schedule_info = format_schedule_info(schedules)
+                print(f"格式化後的行程信息: {schedule_info}")
+                
+                # 將行程信息加入到用戶的提示中
+                prompt = f"""用戶詢問行程相關信息。
+
+目前的行程資料如下：
+{schedule_info}
+
+請根據以上資料，以專業助理的身份回答用戶的問題：{text}
+如果沒有行程，可以建議用戶添加新的行程。
+請使用活潑、友善的語氣回答。"""
+            else:
+                prompt = text
+
+            # 獲取或創建用戶的聊天實例
+            if user_id not in user_chat_history:
+                user_chat_history[user_id] = get_gemini_response()
+            
+            # 使用用戶的聊天實例
+            response = user_chat_history[user_id].send_message(prompt)
             reply_text = response.text
         except Exception as e:
+            print(f"AI 回應錯誤: {str(e)}")
             if hasattr(e, 'finish_reason') and e.finish_reason == 'SAFETY':
                 reply_text = "抱歉，我無法回應這個問題。請嘗試用不同的方式提問。"
             else:
-                reply_text = "抱歉，我現在無法正確處理這個請求。請稍後再試。"
+                # 如果出錯，重新初始化聊天實例
+                try:
+                    user_chat_history[user_id] = get_gemini_response()
+                    response = user_chat_history[user_id].send_message(prompt)
+                    reply_text = response.text
+                except:
+                    reply_text = "抱歉，我現在無法正確處理這個請求。請稍後再試。"
         
         messaging_api.reply_message(
             ReplyMessageRequest(

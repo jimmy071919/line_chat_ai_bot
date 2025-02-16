@@ -6,7 +6,7 @@ def main():
     
     # 1. 創建圖文選單圖片
     print("正在創建圖文選單圖片...")
-    create_rich_menu_image()
+    # create_rich_menu_image()
     print("圖文選單圖片已創建")
     
     # 2. 創建並設置圖文選單

@@ -1,7 +1,10 @@
 import sqlite3
+from datetime import datetime
+import pytz
 import json
+import traceback
 import threading
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 DATABASE = 'line_bot.db'
 thread_local = threading.local()
@@ -49,7 +52,10 @@ def init_db():
             title TEXT NOT NULL,
             description TEXT,
             scheduled_time DATETIME NOT NULL,
-            created_at DATETIME NOT NULL
+            remind_before INTEGER DEFAULT 5,
+            created_at DATETIME NOT NULL,
+            ics_file TEXT,
+            reminded INTEGER DEFAULT 0
         )
         ''')
         
@@ -59,8 +65,9 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id TEXT NOT NULL,
             content TEXT NOT NULL,
-            reminder_time DATETIME NOT NULL,
+            remind_time DATETIME NOT NULL,
             created_at DATETIME NOT NULL,
+            is_done INTEGER DEFAULT 0,
             reminded INTEGER DEFAULT 0
         )
         ''')
@@ -105,13 +112,14 @@ class Database:
         self.db.execute('DELETE FROM user_states WHERE user_id = ?', (user_id,))
         self.db.commit()
 
-    def add_schedule(self, user_id, title, description, scheduled_time):
+    def add_schedule(self, user_id, title, description, scheduled_time, remind_before=5):
         """添加行程
         Args:
             user_id (str): 用戶ID
             title (str): 行程標題
             description (str): 行程描述
             scheduled_time (str): 行程時間，格式為 YYYY-MM-DD HH:MM:SS
+            remind_before (int): 提前多少分鐘提醒，預設5分鐘
         Returns:
             bool: 是否成功添加
         """
@@ -125,8 +133,8 @@ class Database:
                 scheduled_time = scheduled_time.replace('T', ' ') + ':00'
             
             cursor.execute(
-                "INSERT INTO schedules (user_id, title, description, scheduled_time, created_at) VALUES (?, ?, ?, ?, ?)",
-                (user_id, title, description, scheduled_time, now)
+                "INSERT INTO schedules (user_id, title, description, scheduled_time, remind_before, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, title, description, scheduled_time, remind_before, now)
             )
             self.db.commit()
             return True
@@ -134,12 +142,12 @@ class Database:
             print(f"添加行程時出錯: {e}")
             return False
 
-    def add_reminder(self, user_id, content, reminder_time):
+    def add_reminder(self, user_id, content, remind_time):
         """添加提醒"""
         self.db.execute('''
-            INSERT INTO reminders (user_id, content, reminder_time)
-            VALUES (?, ?, ?)
-        ''', (user_id, content, reminder_time))
+            INSERT INTO reminders (user_id, content, remind_time, created_at)
+            VALUES (?, ?, ?, ?)
+        ''', (user_id, content, remind_time, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
         self.db.commit()
 
     def add_note(self, user_id, content):
@@ -177,7 +185,7 @@ class Database:
 
     def get_reminders(self, user_id):
         """獲取用戶的所有提醒"""
-        cursor = self.db.execute('SELECT * FROM reminders WHERE user_id = ? ORDER BY reminder_time', (user_id,))
+        cursor = self.db.execute('SELECT * FROM reminders WHERE user_id = ? ORDER BY remind_time', (user_id,))
         return cursor.fetchall()
 
     def get_notes(self, user_id):
@@ -194,8 +202,8 @@ class Database:
         cursor = self.db.execute('''
             SELECT * FROM reminders 
             WHERE user_id = ? 
-            AND datetime(reminder_time) >= datetime(?)
-            ORDER BY reminder_time
+            AND datetime(remind_time) >= datetime(?)
+            ORDER BY remind_time
         ''', (user_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
         return cursor.fetchall()
 
@@ -280,6 +288,53 @@ class Database:
         except Exception as e:
             print(f"刪除行程時出錯: {e}")
             return False
+
+    def get_user_schedules(self, user_id):
+        """獲取用戶的所有行程"""
+        try:
+            cursor = self.db.cursor()
+            # 將結果轉換為字典格式
+            cursor.row_factory = sqlite3.Row
+            
+            cursor.execute("""
+                SELECT s.title, s.description, s.scheduled_time, s.remind_before
+                FROM schedules s
+                WHERE s.user_id = ?
+                AND datetime(s.scheduled_time) >= datetime('now', 'localtime')
+                ORDER BY s.scheduled_time ASC
+            """, (user_id,))
+            
+            schedules = []
+            for row in cursor.fetchall():
+                # 使用列名而不是索引來訪問數據
+                print(f"讀取到行程: {dict(row)}")
+                
+                # 格式化時間
+                scheduled_time = row['scheduled_time']
+                try:
+                    # 將時間轉換為更友好的格式
+                    dt = datetime.strptime(scheduled_time, '%Y-%m-%d %H:%M:%S')
+                    formatted_time = dt.strftime('%Y年%m月%d日 %H:%M')
+                except Exception as e:
+                    print(f"時間格式化錯誤: {e}")
+                    formatted_time = scheduled_time
+                
+                schedules.append({
+                    'title': row['title'],
+                    'description': row['description'],
+                    'time': formatted_time,
+                    'remind_before': row['remind_before']
+                })
+            
+            # 添加調試信息
+            print(f"用戶 {user_id} 的行程列表: {schedules}")
+            return schedules
+            
+        except Exception as e:
+            print(f"獲取用戶行程時出錯: {e}")
+            import traceback
+            print(traceback.format_exc())
+            return []
 
     def close(self):
         """關閉資料庫連接"""
