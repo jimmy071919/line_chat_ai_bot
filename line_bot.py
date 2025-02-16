@@ -1266,11 +1266,13 @@ def handle_message(event):
             )
         )
 
+# 初始化資料庫
+init_db()
+reminder_handler.start()  # 啟動提醒處理器
+
 @app.teardown_appcontext
 def teardown_db(exception):
     close_db()
 
 if __name__ == "__main__":
-    init_db()  # 初始化資料庫
-    reminder_handler.start()  # 啟動提醒處理器
     app.run(debug=True, use_reloader=False)  # 關閉 reloader 以避免重複啟動提醒處理器
