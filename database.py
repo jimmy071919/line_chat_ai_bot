@@ -244,14 +244,42 @@ class Database:
             return False
 
     def delete_reminder(self, reminder_id):
-        """刪除提醒"""
-        self.db.execute('DELETE FROM reminders WHERE id = ?', (reminder_id,))
-        self.db.commit()
+        """刪除提醒
+        Args:
+            reminder_id (str): 提醒ID
+        Returns:
+            bool: 是否成功刪除
+        """
+        try:
+            cursor = self.db.cursor()
+            cursor.execute(
+                "DELETE FROM reminders WHERE id = ?",
+                (reminder_id,)
+            )
+            self.db.commit()
+            return cursor.rowcount > 0
+        except Exception as e:
+            print(f"刪除提醒時出錯: {e}")
+            return False
 
     def delete_schedule(self, schedule_id):
-        """刪除行程"""
-        self.db.execute('DELETE FROM schedules WHERE id = ?', (schedule_id,))
-        self.db.commit()
+        """刪除行程
+        Args:
+            schedule_id (str): 行程ID
+        Returns:
+            bool: 是否成功刪除
+        """
+        try:
+            cursor = self.db.cursor()
+            cursor.execute(
+                "DELETE FROM schedules WHERE id = ?",
+                (schedule_id,)
+            )
+            self.db.commit()
+            return cursor.rowcount > 0
+        except Exception as e:
+            print(f"刪除行程時出錯: {e}")
+            return False
 
     def close(self):
         """關閉資料庫連接"""

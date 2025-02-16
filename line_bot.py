@@ -1,4 +1,4 @@
-from flask import Flask, request, abort
+from flask import Flask, request, abort, send_file
 from linebot.v3 import WebhookHandler
 from linebot.v3.exceptions import InvalidSignatureError
 from linebot.v3.webhooks import (
@@ -173,6 +173,82 @@ def handle_reminder_input(user_id, text):
     except Exception as e:
         print(f"處理提醒輸入時出錯: {str(e)}")  # 添加日誌
         return "處理提醒時發生錯誤，請重試。"
+
+def generate_ics_content(schedule):
+    """生成 ICS 文件內容
+    Args:
+        schedule (dict): 行程信息
+    Returns:
+        str: ICS 文件內容
+    """
+    start_time = datetime.strptime(schedule['scheduled_time'], '%Y-%m-%d %H:%M:%S')
+    end_time = start_time + timedelta(hours=1)
+    
+    # 轉換為 UTC 時間
+    tz = pytz.timezone('Asia/Taipei')
+    start_utc = tz.localize(start_time).astimezone(pytz.UTC)
+    end_utc = tz.localize(end_time).astimezone(pytz.UTC)
+    
+    now = datetime.now(pytz.UTC)
+    
+    ics_content = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Line Bot//Calendar Event//TW",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+        "BEGIN:VEVENT",
+        f"DTSTART:{start_utc.strftime('%Y%m%dT%H%M%SZ')}",
+        f"DTEND:{end_utc.strftime('%Y%m%dT%H%M%SZ')}",
+        f"DTSTAMP:{now.strftime('%Y%m%dT%H%M%SZ')}",
+        f"UID:{schedule['id']}@linebotcalendar",
+        f"SUMMARY:{schedule['title']}",
+        f"DESCRIPTION:{schedule.get('description', '')}",
+        "END:VEVENT",
+        "END:VCALENDAR"
+    ]
+    
+    return "\r\n".join(ics_content)
+
+def save_ics_file(schedule):
+    """保存 ICS 文件
+    Args:
+        schedule (dict): 行程信息
+    Returns:
+        str: 文件路徑
+    """
+    try:
+        content = generate_ics_content(schedule)
+        file_path = os.path.join(os.path.dirname(__file__), 'temp', f"{schedule['id']}.ics")
+        
+        # 確保 temp 目錄存在
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        
+        return file_path
+    except Exception as e:
+        print(f"保存 ICS 文件時出錯: {e}")
+        return None
+
+@app.route('/calendar_events/<event_id>.ics')
+def serve_calendar_event(event_id):
+    """提供 ICS 文件下載"""
+    try:
+        file_path = os.path.join(os.path.dirname(__file__), 'temp', f"{event_id}.ics")
+        if os.path.exists(file_path):
+            return send_file(
+                file_path,
+                mimetype='text/calendar',
+                as_attachment=True,
+                download_name=f'event_{event_id}.ics'
+            )
+        else:
+            return "Calendar event not found", 404
+    except Exception as e:
+        print(f"提供 ICS 文件時出錯: {e}")
+        return "Error serving calendar event", 500
 
 def send_calendar_link(event_id):
     """生成並發送日曆連結"""
@@ -585,31 +661,65 @@ def handle_postback(event):
         
     elif data.get('action') == "delete_schedule":
         schedule_id = data.get('id')
-        db = Database()
-        if schedule_id and db.delete_schedule(schedule_id):
-            message = TextMessage(text="行程已刪除")
-        else:
-            message = TextMessage(text="刪除行程失敗")
-        messaging_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[message]
+        if not schedule_id:
+            messaging_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text="無效的行程ID")]
+                )
             )
-        )
+            return
+
+        db = Database()
+        if db.delete_schedule(schedule_id):
+            # 同時刪除相關的 ICS 文件
+            try:
+                ics_file = os.path.join(os.path.dirname(__file__), 'temp', f"{schedule_id}.ics")
+                if os.path.exists(ics_file):
+                    os.remove(ics_file)
+            except Exception as e:
+                print(f"刪除 ICS 文件時出錯: {e}")
+
+            messaging_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text="行程已刪除")]
+                )
+            )
+        else:
+            messaging_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text="刪除行程失敗，請重試")]
+                )
+            )
         
     elif data.get('action') == "delete_reminder":
         reminder_id = data.get('id')
-        db = Database()
-        if reminder_id and db.delete_reminder(reminder_id):
-            message = TextMessage(text="提醒已刪除")
-        else:
-            message = TextMessage(text="刪除提醒失敗")
-        messaging_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[message]
+        if not reminder_id:
+            messaging_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text="無效的提醒ID")]
+                )
             )
-        )
+            return
+
+        db = Database()
+        if db.delete_reminder(reminder_id):
+            messaging_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text="提醒已刪除")]
+                )
+            )
+        else:
+            messaging_api.reply_message(
+                ReplyMessageRequest(
+                    reply_token=event.reply_token,
+                    messages=[TextMessage(text="刪除提醒失敗，請重試")]
+                )
+            )
         
     elif data.get('action') == "add_to_calendar":
         schedule_id = data.get('id')
@@ -634,6 +744,11 @@ def handle_postback(event):
             return
 
         try:
+            # 生成 ICS 文件
+            file_path = save_ics_file(schedule)
+            if not file_path:
+                raise Exception("生成 ICS 文件失敗")
+
             # 生成 Google Calendar 連結
             title = quote(schedule['title'])
             description = quote(schedule.get('description', ''))
@@ -647,12 +762,18 @@ def handle_postback(event):
                 f"&ctz=Asia/Taipei"
             )
             
+            # 生成 ICS 文件下載連結
+            ics_url = f"{request.url_root.rstrip('/')}/calendar_events/{schedule_id}.ics"
+            
             messaging_api.reply_message(
                 ReplyMessageRequest(
                     reply_token=event.reply_token,
                     messages=[
-                        TextMessage(text="點擊下方連結將行程加入 Google 日曆："),
-                        TextMessage(text=calendar_url)
+                        TextMessage(text="請選擇要使用的日曆：\n\n" +
+                                       "1. iPhone/Mac 內建日曆：\n" +
+                                       f"{ics_url}\n\n" +
+                                       "2. Google 日曆：\n" +
+                                       f"{calendar_url}")
                     ]
                 )
             )
